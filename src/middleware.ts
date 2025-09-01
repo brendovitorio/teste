@@ -2,7 +2,7 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-// Rate limiting storage (em produção, use Redis ou DB)
+// Rate limiting storage (em produção, prefira Redis ou DB)
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 
 function rateLimit(ip: string, limit: number = 10, windowMs: number = 60000): boolean {
@@ -14,55 +14,52 @@ function rateLimit(ip: string, limit: number = 10, windowMs: number = 60000): bo
     return true;
   }
 
-  if (current.count >= limit) {
-    return false;
-  }
+  if (current.count >= limit) return false;
 
   current.count++;
   return true;
 }
 
-function addSecurityHeaders(response: NextResponse): NextResponse {
-  response.headers.set(
+// Headers de segurança
+function addSecurityHeaders(res: NextResponse) {
+  res.headers.set(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https:; connect-src 'self' https://*.supabase.co https://api.stripe.com; frame-src https://js.stripe.com;"
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https:; connect-src 'self' https://*.supabase.co https://api.stripe.com; frame-src https://js.stripe.com;"
   );
-  response.headers.set('X-Frame-Options', 'DENY');
-  response.headers.set('X-Content-Type-Options', 'nosniff');
-  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.headers.set('X-Frame-Options', 'DENY');
+  res.headers.set('X-Content-Type-Options', 'nosniff');
+  res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   if (process.env.NODE_ENV === 'production') {
-    response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
-  return response;
+  return res;
 }
 
 export async function middleware(req: NextRequest) {
+  // Ignora arquivos estáticos
+  const staticFiles = /_next\/static|_next\/image|favicon.ico|.*\.(?:svg|png|jpg|jpeg|gif|webp)$/;
+  if (req.nextUrl.pathname.match(staticFiles)) return NextResponse.next();
+
   const res = NextResponse.next();
-
   const ip = req.ip || req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown';
+  const isProd = process.env.NODE_ENV === 'production';
 
-  // rate limiting para auth
-  if (process.env.NODE_ENV === 'production') {
-    if (req.nextUrl.pathname.startsWith('/auth/') || req.nextUrl.pathname.startsWith('/api/auth/')) {
-      if (!rateLimit(ip, 5, 300000)) {
-        return new NextResponse('Too Many Requests', { status: 429 });
-      }
+  // Rate limit apenas para produção e rotas sensíveis
+  if (isProd && (req.nextUrl.pathname.startsWith('/auth/') || req.nextUrl.pathname.startsWith('/api/auth/'))) {
+    if (!rateLimit(ip, 10, 60000)) {
+      return new NextResponse('Too Many Requests', { status: 429 });
     }
   }
 
-
-  if (!rateLimit(ip, 10000, 60000)) {
-    return new NextResponse('Too Many Requests', { status: 429 });
-  }
-
+  // Supabase server client
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
         get(name: string) {
-          return req.cookies.get(name)?.value;
+          return req.cookies.get(name)?.value || '';
         },
         set(name: string, value: string, options: any) {
           res.cookies.set(name, value, options);
@@ -74,23 +71,25 @@ export async function middleware(req: NextRequest) {
     }
   );
 
+  // Pega user a partir dos cookies
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  console.log("User in middleware:", user?.email || null);
+  console.log('User in middleware:', user?.email || null);
 
   const protectedPaths = ['/dashboard', '/funcionarios', '/configuracoes'];
-  const isProtectedPath = protectedPaths.some((path) => req.nextUrl.pathname.startsWith(path));
+  const isProtectedPath = protectedPaths.some(path => req.nextUrl.pathname.startsWith(path));
 
+  // Redireciona se não estiver logado
   if (isProtectedPath && !user) {
     const redirectUrl = new URL('/auth/login', req.url);
     redirectUrl.searchParams.set('redirectTo', req.nextUrl.pathname);
     return NextResponse.redirect(redirectUrl);
   }
 
-  if ((req.nextUrl.pathname.startsWith('/auth/login') ||
-       req.nextUrl.pathname.startsWith('/auth/register')) && user) {
+  // Redireciona para dashboard se já logado
+  if ((req.nextUrl.pathname.startsWith('/auth/login') || req.nextUrl.pathname.startsWith('/auth/register')) && user) {
     return NextResponse.redirect(new URL('/dashboard', req.url));
   }
 
