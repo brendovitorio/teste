@@ -37,6 +37,10 @@ function addSecurityHeaders(res: NextResponse) {
 }
 
 export async function middleware(req: NextRequest) {
+
+  const ignorePaths = /_next\/static|_next\/image|favicon.ico|.*\.(?:svg|png|jpg|jpeg|gif|webp)$/;
+  if (req.nextUrl.pathname.match(ignorePaths)) return NextResponse.next();
+
   // Ignora arquivos estáticos
   const staticFiles = /_next\/static|_next\/image|favicon.ico|.*\.(?:svg|png|jpg|jpeg|gif|webp)$/;
   if (req.nextUrl.pathname.match(staticFiles)) return NextResponse.next();
@@ -46,11 +50,14 @@ export async function middleware(req: NextRequest) {
   const isProd = process.env.NODE_ENV === 'production';
 
   // Rate limit apenas para produção e rotas sensíveis
-  if (isProd && (req.nextUrl.pathname.startsWith('/auth/') || req.nextUrl.pathname.startsWith('/api/auth/'))) {
+  const protectedRateLimitPaths = ['/auth/', '/api/auth/'];
+  if (isProd && protectedRateLimitPaths.some(path => req.nextUrl.pathname.startsWith(path))) {
+    // limite baixo, ex: 10 requests por minuto
     if (!rateLimit(ip, 10, 60000)) {
       return new NextResponse('Too Many Requests', { status: 429 });
     }
   }
+
 
   // Supabase server client
   const supabase = createServerClient(
